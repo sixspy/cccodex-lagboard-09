@@ -1,0 +1,4 @@
+f984b1a093e558057ac2ac8ed775ed3c991f3d5dccc40030319229b73c556eab  冻结禁写说明.md
+# 封档口径：对本文件分隔线（---）之后的“封档信息：”之前全部字节计算 SHA-256
+# 封档日期：2026-11-19（冻结当天，不许改口）
+# 校验：python3 -c "import hashlib,pathlib;b=pathlib.Path('ops/冻结禁写说明.md').read_bytes();m=b'\n---\n\n'+'\u5c01\u6863\u4fe1\u606f\uff1a'.encode();i=b.index(m);print(hashlib.sha256(b[:i+1]).hexdigest())"

@@ -36,6 +36,9 @@
   .timeline{border-left:2px solid #cbd5e1;margin-left:8px;padding-left:14px}
   .timeline .item{margin-bottom:12px;position:relative}
   .timeline .item:before{content:"";position:absolute;left:-19px;top:6px;width:8px;height:8px;border-radius:50%;background:var(--blue)}
+  .sla{display:flex;justify-content:space-between;gap:10px;background:#f1f5f9;border-left:4px solid var(--ok);border-radius:8px;padding:9px 11px;font-size:13px;margin-bottom:10px}
+  .sla.warn{border-color:var(--warn)}.sla.bad{border-color:var(--bad);background:#fef2f2}
+  .primary:disabled{background:#94a3b8;cursor:not-allowed}
 </style>
 </head>
 <body>
@@ -59,11 +62,20 @@ createApp({
     const user=ref(localStorage.getItem('lagboard_user')||'');
     const username=ref('admin'), password=ref('123456'), err=ref(''), tab=ref(0), actionErr=ref('');
     const sources=ref([]), arrivals=ref([]), catchups=ref([]);
+    const audit=ref([]), tasks=ref([]), watermarks=ref([]);
     const form=ref({source:'订单源', source_clock:'2026-11-16T10:00:00', ingest_clock:'2026-11-16T10:40:00'});
-    const nav=['到达登记','滞后分级','补齐恢复'];
+    const nav=['到达登记','滞后分级','补齐恢复','冻结台账'];
     const frozen=computed(()=>sources.value.filter(s=>s.output_mode==='冻结').length);
     const degraded=computed(()=>sources.value.filter(s=>s.output_mode==='降级只读').length);
     function modeClass(m){return m==='冻结'?'bad':(m==='降级只读'?'warn':'ok');}
+    function srcByName(n){return sources.value.find(s=>s.name===n);}
+    const picked=computed(()=>srcByName(form.value.source));
+    const pickedFrozen=computed(()=>!!picked.value && picked.value.output_mode==='冻结');
+    const remaining=computed(()=>{
+      if(!picked.value) return null;
+      const mins=Math.round((new Date(form.value.ingest_clock)-new Date(form.value.source_clock))/60000);
+      return picked.value.sla_minutes-mins;
+    });
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -88,6 +100,12 @@ createApp({
       arrivals.value=Array.isArray(a.items)?a.items:[];
       const c=await loadJson('/api/catchups'); if(c===null) return;
       catchups.value=Array.isArray(c.items)?c.items:[];
+      const au=await loadJson('/api/freeze/audit'); if(au===null) return;
+      audit.value=Array.isArray(au.items)?au.items:[];
+      const tk=await loadJson('/api/freeze/tasks'); if(tk===null) return;
+      tasks.value=Array.isArray(tk.items)?tk.items:[];
+      const wm=await loadJson('/api/freeze/watermarks'); if(wm===null) return;
+      watermarks.value=Array.isArray(wm.items)?wm.items:[];
       if(sources.value.length && !form.value.source) form.value.source=sources.value[0].name;
     }
     async function recordArrival(){
@@ -98,7 +116,7 @@ createApp({
     }
     async function doCatchup(name){await fetch('/api/catchup/'+encodeURIComponent(name),{method:'POST',headers:auth()});await refresh();}
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,form,actionErr,frozen,degraded,modeClass,login,logout,recordArrival,doCatchup};
+    return {token,user,username,password,err,tab,nav,sources,arrivals,catchups,audit,tasks,watermarks,form,actionErr,frozen,degraded,modeClass,srcByName,picked,pickedFrozen,remaining,login,logout,recordArrival,doCatchup};
   },
   template:`
   <div v-if="!token" class="login">
@@ -128,13 +146,18 @@ createApp({
         <div class="card"><h3>降级只读</h3><strong>{{degraded}}</strong></div>
       </div>
       <div class="card" v-show="tab===0">
-        <h3 style="margin-bottom:8px">登记到达</h3>
+        <h3 style="margin-bottom:8px">登记到达 · 时限台</h3>
+        <div class="sla" :class="pickedFrozen?'bad':(remaining<0?'warn':'ok')">
+          <b>{{form.source}}</b>
+          <span v-if="pickedFrozen">冻结禁写：该源入库已被门闩拦住，仅补齐后可恢复</span>
+          <span v-else-if="remaining!==null">距 SLA 时限还剩 {{remaining}} 分钟（SLA {{picked.sla_minutes}} 分）</span>
+        </div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
           <div><label>源</label><select v-model="form.source"><option v-for="s in sources" :value="s.name">{{s.name}}</option></select></div>
           <div><label>源时钟</label><input v-model="form.source_clock"/></div>
           <div><label>摄入时钟</label><input v-model="form.ingest_clock"/></div>
         </div>
-        <button class="primary" @click="recordArrival">计算滞后并更新输出态</button>
+        <button class="primary" :disabled="pickedFrozen" @click="recordArrival">{{pickedFrozen?'冻结禁写 · 入库已拦':'计算滞后并更新输出态'}}</button>
         <div class="err">{{actionErr}}</div>
         <div class="timeline" style="margin-top:16px">
           <div class="item" v-for="a in (arrivals||[]).slice(0,8)" :key="a.id">
@@ -156,6 +179,19 @@ createApp({
         <h3>补齐记录</h3>
         <table><thead><tr><th>源</th><th>状态</th><th>恢复为</th><th>时间</th></tr></thead>
         <tbody><tr v-for="x in catchups" :key="x.id"><td>{{x.source}}</td><td>{{x.status}}</td><td>{{x.restored_mode}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+      </div>
+      <div class="card" v-show="tab===3">
+        <h3 style="margin-bottom:8px">冻结台账（审计附页 / 水位页 / 任务列表）</h3>
+        <p style="color:#64748b;font-size:13px">五处同态：源目录、到达流水、审计附页、水位页、任务列表同读一库。</p>
+        <h4 style="font-size:13px;margin:14px 0 6px">审计附页</h4>
+        <table><thead><tr><th>源</th><th>类别</th><th>态</th><th>说明</th><th>时间</th></tr></thead>
+        <tbody><tr v-for="x in audit.slice(0,10)" :key="'a'+x.id"><td>{{x.source}}</td><td>{{x.kind}}</td><td>{{x.mode}}</td><td>{{x.detail}}</td><td>{{x.created_at}}</td></tr></tbody></table>
+        <h4 style="font-size:13px;margin:14px 0 6px">水位页</h4>
+        <table><thead><tr><th>源</th><th>态</th><th>最后源时钟</th><th>冻结于</th></tr></thead>
+        <tbody><tr v-for="w in watermarks" :key="'w'+w.source"><td>{{w.source}}</td><td>{{w.state}}</td><td>{{w.last_source_clock||'—'}}</td><td>{{w.frozen_at||'—'}}</td></tr></tbody></table>
+        <h4 style="font-size:13px;margin:14px 0 6px">任务列表</h4>
+        <table><thead><tr><th>源</th><th>状态</th><th>类别</th><th>说明</th></tr></thead>
+        <tbody><tr v-for="t in tasks.slice(0,10)" :key="'t'+t.id"><td>{{t.source}}</td><td>{{t.status}}</td><td>{{t.kind}}</td><td>{{t.detail}}</td></tr></tbody></table>
       </div>
     </main>
   </div>`
